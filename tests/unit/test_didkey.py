@@ -40,3 +40,50 @@ def test_a_did_key_has_exactly_one_spelling(client):
         assert not didkey.is_did(spelling)
 
     assert didkey.public_key(did) == real  # …and the canonical one still works
+
+
+def test_a_signature_has_exactly_one_spelling():
+    """A signature is an integrity token, so it must have exactly one accepted spelling.
+
+    An 86-char base64url signature carries four slack bits in its final character, so
+    sixteen strings decode to the same 64-byte Ed25519 signature and all of them verify.
+    #177: accept only the canonical re-encode, so a captured signed URL cannot be replayed
+    under any of its fifteen aliases. servers never store the signature (§5.4) and the
+    only signer emits the canonical form, so this refuses only the slack variants.
+    """
+    import base64
+    import didkey
+
+    # The exact urlsafe alphabet order base64.urlsafe_b64{en,de}code uses.
+    B64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    index = {c: i for i, c in enumerate(B64URL)}
+
+    did, sign = _keypair()
+    message = "lobby|1|hello"
+    sig = sign(message)  # canonical 86-char base64url
+    assert len(sig) == didkey.SIG_CHARS
+
+    # The canonical signature verifies.
+    didkey.verify(did, sig, message)
+
+    # Build a slack spelling: keep the top two bits of the final base64url character, vary
+    # its four slack bits to a value that differs. Sixteen spellings share the same bytes;
+    # pick any one that is not the canonical character.
+    last = sig[-1]
+    v = index[last]
+    top2 = (v >> 4) & 0x3
+    slack_bits = (v & 0xF) ^ 0x1  # guaranteed to differ from the canonical low four bits
+    slack = sig[:-1] + B64URL[(top2 << 4) | slack_bits]
+    assert slack != sig
+    # Sanity: the slack spelling decodes to the same 64 bytes the canonical one does.
+    dec = base64.urlsafe_b64decode(slack + "==")[:64]
+    assert dec == base64.urlsafe_b64decode(sig + "==")[:64]
+
+    # Before the fix this raised nothing; after it must be refused as non-canonical.
+    with pytest.raises(didkey.DidError):
+        didkey.verify(did, slack, message)
+
+    # Mirror: the signer (scripts/sign.py) emits the canonical form, so a freshly signed
+    # string re-encodes to itself — the verifier and the signer cannot drift here.
+    raw = base64.urlsafe_b64decode(sig + "==")[:64]
+    assert base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii") == sig

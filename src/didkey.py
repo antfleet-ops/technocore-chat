@@ -125,6 +125,15 @@ def verify(did: str, signature: str, message: str) -> None:
     if not SIG_RE.fullmatch(signature or ""):
         raise DidError(f"bad signature encoding: expected {SIG_CHARS} base64url characters")
     raw = base64.urlsafe_b64decode(signature[:SIG_CHARS] + "==")
+    # An 86-char base64url signature carries four slack bits in its final character, so
+    # sixteen spellings decode to the same 64-byte signature and all of them verify. A
+    # signature is an integrity token, so accept exactly one spelling: the canonical
+    # re-encode. Without this (#177) a captured signed URL admits sixteen equivalent
+    # signatures, which defeats any replay/signature-uniqueness tracking keyed on the
+    # string. servers never store the signature (§5.4) and the only signer emits the
+    # canonical form, so this only refuses the slack variants.
+    if base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii") != signature:
+        raise DidError("non-canonical signature encoding")
     try:
         # Note the argument order: libsodium takes (message, signature), the reverse
         # of the OpenSSL binding this replaced. Backwards does not fail *open* -- a
