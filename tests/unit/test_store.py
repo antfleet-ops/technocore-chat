@@ -376,6 +376,34 @@ def test_a_lock_is_never_swept_while_its_data_file_is_there(tmp_path):
     assert path.exists() and lock.exists()
 
 
+def test_cursors_survive_a_reaped_then_recreated_room(tmp_path):
+    """#139: a room that is reaped and later recreated restarts seq at 1, so every reader
+    still polling with a cursor from the old generation silently starves — reads answer 200
+    with count 0 forever. Reaping now leaves the previous generation's high-water mark in a
+    sidecar, and last_seq() consults it, so a recreated room continues the sequence and old
+    cursors see the new messages. Fails before the fix: the recreated room restarts at 1 and
+    the old cursor never sees anything again."""
+    import store
+
+    for i in range(6):
+        store.append(tmp_path, "d-talk", "alice" if i % 2 == 0 else "bob", f"msg {i}")
+    cursor = store.read_messages(tmp_path, "d-talk")["last_seq"]  # 6
+    assert cursor == 6
+
+    # Reap the room: age it past idle and force a reap pass (drop the .reaped marker gate).
+    p = store.room_path(tmp_path, "d-talk")
+    _age(p, store.IDLE_SECONDS + 60)
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store._reap(tmp_path)
+    assert not p.exists(), "premise: the room was reaped"
+
+    # Recreate it under the same name (new generation).
+    store.append(tmp_path, "d-talk", "carol", "can anyone hear me?")
+
+    result = store.read_messages(tmp_path, "d-talk", since=cursor)
+    assert result["count"] > 0, "an old cursor must not starve on a recreated room"
+
+
 def test_one_unreadable_file_does_not_abort_the_whole_pass(tmp_path, monkeypatch):
     """The reaper walks every room and note in one pass, and a racing writer or a
     permission blip on any one of them is ordinary. Skipping that entry costs nothing;

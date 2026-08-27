@@ -769,15 +769,46 @@ def read_messages(root: Path, room: str, limit: int = 50, since: int | None = No
     }
 
 
+def _seq_floor_path(root: Path) -> Path:
+    return root / ".seqfloor"
+
+
+def _read_seq_floor(root: Path) -> dict:
+    try:
+        return orjson.loads(_seq_floor_path(root).read_bytes())
+    except (OSError, orjson.JSONDecodeError):
+        return {}
+
+
+def _write_seq_floor(root: Path, floor: dict) -> None:
+    # Atomic rewrite so last_seq() never reads a torn map. Best-effort: if the store is
+    # read-only or the write fails, the floor is a nice-to-have, not a correctness gate.
+    try:
+        _replace(_seq_floor_path(root), orjson.dumps(floor), fsync=config.FSYNC)
+    except OSError:
+        pass
+
+
 def last_seq(root: Path, room: str) -> int:
     path = room_path(root, room)
-    if not path.exists():
+    if path.exists():
+        with path.open("rb") as f:
+            for raw in reverse_lines(f, max_bytes=65536):
+                rec = _parse(raw)
+                if rec is not None:
+                    return rec["seq"]
         return 0
-    with path.open("rb") as f:
-        for raw in reverse_lines(f, max_bytes=65536):
-            rec = _parse(raw)
-            if rec is not None:
-                return rec["seq"]
+    # The room file is gone (reaped). A recreated room carries the previous generation's
+    # high-water mark in a root-level floor map so cursors from the old generation keep
+    # seeing new messages instead of starving on a restarted sequence (#139): a reader's
+    # `since` stays below the new first_seq, so the new messages are not silently invisible.
+    # Kept out of the room's bucket so it does not defeat the bucket-pruning invariant.
+    floor = _read_seq_floor(root)
+    if room in floor:
+        try:
+            return int(floor[room])
+        except (TypeError, ValueError):
+            return 0
     return 0
 
 
@@ -1241,6 +1272,19 @@ def _reap(root: Path) -> None:
                 with _locked(p):
                     reason = _reapable(p, now, stillborn_rule)
                     if reason:
+                        if stillborn_rule:
+                            # Leave the previous generation's high-water mark behind so a
+                            # recreated room continues the sequence instead of restarting at 1
+                            # and stranding every cursor pointing past it (#139). Stored in a
+                            # root-level map under the floor lock. Consumed by last_seq() and
+                            # removed when the room is recreated. (Rooms only: notes are not
+                            # sequenced, so they carry no floor.)
+                            room = p.name[: -len(".jsonl")]
+                            with _locked(root / ".seqfloor"):
+                                floor = _read_seq_floor(root)
+                                if (hwm := last_seq(root, room)) > 0:
+                                    floor[room] = hwm
+                                _write_seq_floor(root, floor)
                         p.unlink(missing_ok=True)
                         config._dbg(2, "reap", room=p.name, reason=reason)
                         if stillborn_rule:
@@ -1844,6 +1888,15 @@ def _write_record(
         limit = _ring_limit(root)
         if path.stat().st_size > limit:
             _compact(path, cutoff=_cutoff(room), keep=limit // 2)
+    if created:
+        # Consume the generation high-water mark the reaper left behind (#139): the
+        # recreated room has taken up the sequence where the old one left off, so the
+        # floor entry is now stale and must not be reused on a later reap.
+        with _locked(root / ".seqfloor"):
+            floor = _read_seq_floor(root)
+            if room in floor:
+                del floor[room]
+                _write_seq_floor(root, floor)
     return rec, created
 
 
