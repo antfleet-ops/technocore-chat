@@ -1152,9 +1152,22 @@ def _sweep_orphan_locks(root: Path, now: float) -> None:
                 # directory fd out of the walk would buy a rounding error and cost an fd
                 # lifetime per namespace. The Path was the expense, not the syscall.
                 data = entry.path[: -len(".lock")]
-                if os.access(data, os.F_OK) or now - entry.stat().st_mtime <= IDLE_SECONDS:
-                    continue
-                os.unlink(entry.path)
+                if os.access(data, os.F_OK):
+                    continue  # data still there: the room/note is alive, keep its lock
+                if now - entry.stat().st_mtime <= IDLE_SECONDS:
+                    continue  # not idle long enough: keep (grace for fresh orphans)
+                # A sidecar's mtime is its *creation* time and never advances — flock does
+                # not touch it — so an idle-reaped room's lock is already "old" the instant
+                # its data is deleted, and the idle check above would sweep it in the same
+                # reap pass a writer is recreating the room in. Ask the property the idle
+                # check cannot: is anyone *holding* it? A non-blocking lock that blocks
+                # means a writer is inside, so we skip and never unlink a held lock (#302).
+                with open(entry.path, "a+b") as lf:
+                    try:
+                        fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        continue  # a writer holds it: not an orphan
+                    os.unlink(entry.path)  # idle, orphaned, and free: genuine orphan
             except OSError:
                 continue
 

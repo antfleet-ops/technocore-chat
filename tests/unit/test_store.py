@@ -376,6 +376,30 @@ def test_a_lock_is_never_swept_while_its_data_file_is_there(tmp_path):
     assert path.exists() and lock.exists()
 
 
+def test_a_held_lock_is_never_swept_even_without_its_data(tmp_path):
+    """#302: the sweep's mtime-grace was a proxy for "nobody holds this", and the wrong
+    one — a sidecar's mtime is its creation time and never advances, so an idle-reaped
+    room's lock looks old the moment its data is deleted: zero grace, not a week. The sweep
+    must instead ask whether the lock is currently held. A lock a writer holds must survive
+    the sweep even with its data file gone and its mtime ancient. Fails before the fix,
+    because the mtime predicate unlinks the held lock.
+    """
+    import fcntl
+    import store
+    import time
+
+    store.append(tmp_path, "held", "bot", "hi")
+    path = store.room_path(tmp_path, "held")
+    lock = path.with_suffix(".jsonl.lock")
+    # Reap the data file, as the reaper would, but keep the writer's lock held.
+    path.unlink()
+    _age(lock, store.IDLE_SECONDS + 60)
+    with open(lock, "a+b") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)  # a writer is inside
+        store._sweep_orphan_locks(tmp_path, time.time())
+        assert lock.exists(), "a held lock must not be unlinked underneath its writer"
+
+
 def test_one_unreadable_file_does_not_abort_the_whole_pass(tmp_path, monkeypatch):
     """The reaper walks every room and note in one pass, and a racing writer or a
     permission blip on any one of them is ordinary. Skipping that entry costs nothing;
