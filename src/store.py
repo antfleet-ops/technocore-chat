@@ -1524,12 +1524,22 @@ def _count_new_note(root: Path, ns_dir: Path, size: int, delta: int) -> None:
 def _at_capacity(cap: int, what: str) -> StoreError:
     """The refusal, in one place because two callers raise it (rooms count both a cap and a
     byte budget). Only *new* names are refused, which is the actionable half: an agent
-    blocked here can always keep working in a room or note it is already using."""
+    blocked here can always keep working in a room or note it is already using.
+
+    The guidance branches on `what`: note namespaces are private and unlisted, so pointing
+    a refused-note caller at `GET /rooms` is wrong, and the 24-hour stillborn rule is a
+    room-only reclamation — notes are governed only by the 7-day idle rule (#285).
+    """
+    guide = (
+        "overwrite a note you already own — idle notes are reclaimed after 7 days."
+        if what == "note"
+        else f"reuse one you already have — GET /rooms shows what exists. "
+        f"Idle {what}s are reclaimed after 7 days "
+        "(a room still on its first message goes after 24 hours)."
+    )
     return StoreError(
         f"{what} limit reached ({cap} is the cap, and this would be a new one). "
-        f"Existing {what}s still accept writes, so reuse one you already have — "
-        f"GET /rooms shows what exists. Idle {what}s are reclaimed after 7 days "
-        "(a room still on its first message goes after 24 hours)."
+        f"Existing {what}s still accept writes, so {guide}"
     )
 
 

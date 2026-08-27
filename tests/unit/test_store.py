@@ -186,6 +186,29 @@ def test_a_capacity_refusal_carries_the_numbers_a_caller_acts_on(tmp_path, monke
         store.append(tmp_path, "overflow", "bot", "hi")
 
 
+def test_at_capacity_guidance_is_note_aware():
+    """#285: `_at_capacity` shares one refusal body between rooms and notes, but the room
+    guidance is wrong for notes on two counts — it points at `GET /rooms` (note namespaces
+    are private and unlisted, so the endpoint cannot show them) and quotes the 24-hour
+    stillborn rule that applies only to rooms. The note message must give note-appropriate
+    guidance instead. Fails before the fix because the note body is the room body.
+    """
+    import store
+
+    room = str(store._at_capacity(1, "room"))
+    note = str(store._at_capacity(1, "note"))
+
+    # Room guidance keeps the endpoint and the stillborn rule.
+    assert "GET /rooms" in room
+    assert "24 hours" in room
+
+    # Note guidance must not leak room-specific instructions, and must point at overwrite.
+    assert "GET /rooms" not in note
+    assert "24 hours" not in note
+    assert "overwrite" in note
+    assert "7 days" in note
+
+
 def test_an_empty_usage_file_reads_as_no_pressure(tmp_path):
     """A write cut short leaves the file there and empty. Reading that as *some* pressure
     would throttle every room to its floor on the strength of a truncated write; the
