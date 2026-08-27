@@ -765,26 +765,27 @@ def read_messages(root: Path, room: str, limit: int = 50, since: int | None = No
         "count": len(out),
         "first_seq": out[0]["seq"] if out else None,
         "last_seq": out[-1]["seq"] if out else (since or 0),
+        "generation": room_generation(root, room),
         "messages": out,
     }
 
 
-def _seq_floor_path(root: Path) -> Path:
-    return root / ".seqfloor"
+def _seq_state_path(root: Path) -> Path:
+    return root / ".seqstate"
 
 
-def _read_seq_floor(root: Path) -> dict:
+def _read_seq_state(root: Path) -> dict:
     try:
-        return orjson.loads(_seq_floor_path(root).read_bytes())
+        return orjson.loads(_seq_state_path(root).read_bytes())
     except (OSError, orjson.JSONDecodeError):
         return {}
 
 
-def _write_seq_floor(root: Path, floor: dict) -> None:
-    # Atomic rewrite so last_seq() never reads a torn map. Best-effort: if the store is
-    # read-only or the write fails, the floor is a nice-to-have, not a correctness gate.
+def _write_seq_state(root: Path, state: dict) -> None:
+    # Atomic rewrite so concurrent readers never see a torn map. Best-effort: if the store
+    # is read-only or the write fails, the floor/generation is a nice-to-have, not a gate.
     try:
-        _replace(_seq_floor_path(root), orjson.dumps(floor), fsync=config.FSYNC)
+        _replace(_seq_state_path(root), orjson.dumps(state), fsync=config.FSYNC)
     except OSError:
         pass
 
@@ -800,13 +801,30 @@ def last_seq(root: Path, room: str) -> int:
         return 0
     # The room file is gone (reaped). A recreated room carries the previous generation's
     # high-water mark in a root-level floor map so cursors from the old generation keep
-    # seeing new messages instead of starving on a restarted sequence (#139): a reader's
-    # `since` stays below the new first_seq, so the new messages are not silently invisible.
-    # Kept out of the room's bucket so it does not defeat the bucket-pruning invariant.
-    floor = _read_seq_floor(root)
-    if room in floor:
+    # seeing new messages instead of starving on a restarted sequence (#139 dir #2): a
+    # reader's `since` stays below the new first_seq, so the new messages are not silently
+    # invisible. Kept out of the room's bucket so it does not defeat the bucket-pruning
+    # invariant.
+    entry = _read_seq_state(root).get(room)
+    if entry:
         try:
-            return int(floor[room])
+            return int(entry.get("floor", 0))
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def room_generation(root: Path, room: str) -> int:
+    """The conversation epoch of a room — bumps every time the room is (re)created, so a
+    client holding state about an old conversation can detect that the same name now carries
+    a different one (#139 dir #3). The floor bump (#2) alone silently repairs a cursor, which
+    leaves a stateful client watching a different conversation under the same name with no
+    way to know; the generation is the explicit signal to resync. 0 = never existed, or the
+    conversation has ended (reaped, not yet recreated)."""
+    entry = _read_seq_state(root).get(room)
+    if entry:
+        try:
+            return int(entry.get("gen", 0))
         except (TypeError, ValueError):
             return 0
     return 0
@@ -1275,16 +1293,21 @@ def _reap(root: Path) -> None:
                         if stillborn_rule:
                             # Leave the previous generation's high-water mark behind so a
                             # recreated room continues the sequence instead of restarting at 1
-                            # and stranding every cursor pointing past it (#139). Stored in a
-                            # root-level map under the floor lock. Consumed by last_seq() and
-                            # removed when the room is recreated. (Rooms only: notes are not
-                            # sequenced, so they carry no floor.)
+                            # and stranding every cursor pointing past it (#139 dir #2). Stored
+                            # in a root-level map under the seq-state lock. Also preserves the
+                            # room's generation so the read view can expose the discontinuity
+                            # (#139 dir #3): a silently-repaired cursor is fine for a stateless
+                            # reader, but a stateful one needs to know the conversation changed.
+                            # (Rooms only: notes are not sequenced, so they carry no floor/gen.)
                             room = p.name[: -len(".jsonl")]
-                            with _locked(root / ".seqfloor"):
-                                floor = _read_seq_floor(root)
-                                if (hwm := last_seq(root, room)) > 0:
-                                    floor[room] = hwm
-                                _write_seq_floor(root, floor)
+                            with _locked(root / ".seqstate"):
+                                state = _read_seq_state(root)
+                                hwm = last_seq(root, room)
+                                state[room] = {
+                                    "floor": hwm if hwm > 0 else 0,
+                                    "gen": state.get(room, {}).get("gen", 0),
+                                }
+                                _write_seq_state(root, state)
                         p.unlink(missing_ok=True)
                         config._dbg(2, "reap", room=p.name, reason=reason)
                         if stillborn_rule:
@@ -1889,14 +1912,16 @@ def _write_record(
         if path.stat().st_size > limit:
             _compact(path, cutoff=_cutoff(room), keep=limit // 2)
     if created:
-        # Consume the generation high-water mark the reaper left behind (#139): the
-        # recreated room has taken up the sequence where the old one left off, so the
-        # floor entry is now stale and must not be reused on a later reap.
-        with _locked(root / ".seqfloor"):
-            floor = _read_seq_floor(root)
-            if room in floor:
-                del floor[room]
-                _write_seq_floor(root, floor)
+        # Bump the room's generation: a (re)created room is a new conversation, and the read
+        # view exposes the old generation's number so a stateful client can detect the
+        # discontinuity and resync instead of silently watching a different conversation
+        # (#139 dir #3). Also clears the floor the reaper left behind — the recreated room
+        # has taken up the sequence where the old one left off, so it must not be reused.
+        with _locked(root / ".seqstate"):
+            state = _read_seq_state(root)
+            gen = int(state.get(room, {}).get("gen", 0)) + 1
+            state[room] = {"floor": 0, "gen": gen}
+            _write_seq_state(root, state)
     return rec, created
 
 
