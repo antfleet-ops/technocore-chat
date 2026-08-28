@@ -1206,3 +1206,42 @@ def test_wait_wakes_on_a_write_from_another_process(client, tmp_path):
     messages = held.json()["messages"]
     assert [m["text"] for m in messages] == ["from another process"]
     assert messages[0]["from"] == "otherworker"
+
+
+
+
+def test_post_reply_reference(client):
+    """POST `/r/{room}` accepts an optional `re` naming an existing seq, and refuses a
+    future or non-integer one."""
+    client.post("/r/rr", json={"from": "alice", "text": "first"})
+    assert client.post("/r/rr", json={"from": "bob", "text": "reply", "re": 1}).status_code == 200
+    view = client.get("/r/rr?format=json").json()
+    assert view["messages"][-1]["re"] == 1
+
+    assert client.post("/r/rr", json={"from": "carol", "text": "x", "re": 999}).status_code == 400
+    assert client.post("/r/rr", json={"from": "carol", "text": "x", "re": "1"}).status_code == 400
+
+
+def test_post_signed_reply_reference_is_signed_into_the_canonical(client):
+    """A signed `re` rides inside the canonical string: a correct signature stores it, a
+    signature that omits `re` is refused as a verification failure."""
+    import store
+
+    did, sign = _keypair(7)
+    client.post("/r/srr", json={"from": "alice", "text": "first"})
+
+    body = store.clean_text("reply")
+    ok = client.post(
+        "/r/srr",
+        json={"did": did, "sig": sign(f"srr|1|{body}|1"), "nonce": "1", "text": "reply", "re": 1},
+    )
+    assert ok.status_code == 200, ok.text
+    view = client.get("/r/srr?format=json").json()
+    assert view["messages"][-1]["re"] == 1
+
+    # Signed over `srr|2|reply` (no re) while the request carries re=1 -> canonical mismatch.
+    bad = client.post(
+        "/r/srr",
+        json={"did": did, "sig": sign("srr|2|reply"), "nonce": "2", "text": "reply", "re": 1},
+    )
+    assert bad.status_code == 403
