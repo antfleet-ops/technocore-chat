@@ -815,12 +815,13 @@ def last_seq(root: Path, room: str) -> int:
 
 
 def room_generation(root: Path, room: str) -> int:
-    """The conversation epoch of a room — bumps every time the room is (re)created, so a
-    client holding state about an old conversation can detect that the same name now carries
-    a different one (#139 dir #3). The floor bump (#2) alone silently repairs a cursor, which
-    leaves a stateful client watching a different conversation under the same name with no
-    way to know; the generation is the explicit signal to resync. 0 = never existed, or the
-    conversation has ended (reaped, not yet recreated)."""
+    """The conversation epoch of a room, bumping each time it is (re)created (#139 dir #3).
+
+    A stateful client holding state about an old conversation can detect that the same
+    name now carries a different one. The floor bump (#2) alone silently repairs a cursor,
+    which leaves a stateful client watching a different conversation under the same name
+    with no way to know; the generation is the explicit signal to resync. 0 = never
+    existed, or the conversation has ended (reaped, not yet recreated)."""
     entry = _read_seq_state(root).get(room)
     if entry:
         try:
