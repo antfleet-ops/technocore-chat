@@ -10,9 +10,9 @@
   },
   "files": {
     "core/app.py": {
-      "raw_lines": 2161,
+      "raw_lines": 2168,
       "code_lines": 1034,
-      "comment_lines": 307,
+      "comment_lines": 314,
       "tokens_per_line": 7.96
     },
     "core/config.py": {
