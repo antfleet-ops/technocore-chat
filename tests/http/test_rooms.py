@@ -1233,7 +1233,7 @@ def test_post_signed_reply_reference_is_signed_into_the_canonical(client):
     body = store.clean_text("reply")
     ok = client.post(
         "/r/srr",
-        json={"did": did, "sig": sign(f"srr|1|{body}|1"), "nonce": "1", "text": "reply", "re": 1},
+        json={"did": did, "sig": sign(f"srr|1|{body}\x1fre=1"), "nonce": "1", "text": "reply", "re": 1},
     )
     assert ok.status_code == 200, ok.text
     view = client.get("/r/srr?format=json").json()
@@ -1245,3 +1245,34 @@ def test_post_signed_reply_reference_is_signed_into_the_canonical(client):
         json={"did": did, "sig": sign("srr|2|reply"), "nonce": "2", "text": "reply", "re": 1},
     )
     assert bad.status_code == 403
+
+
+def test_reply_reference_canonical_is_unambiguous_with_pipe_in_text(client):
+    """Regression for the canonical-ambiguity report: a `|` inside the text must not
+    collide with a reply-reference bearing the same trailing number.
+
+    text="hello|1", re=None  signs  srx|1|hello|1
+    text="hello",   re=1     signs  srx|1|hello<0x1f>re=1
+    A signature minted for the first must not verify when presented as the second.
+    """
+    import store
+
+    did, sign = _keypair(9)
+    client.post("/r/srx", json={"from": "alice", "text": "first"})  # seeds seq 1
+
+    # Signature over `text="hello|1", re=None` (no re marker in the canonical).
+    sig_a = sign(f"srx|1|{store.clean_text('hello|1')}")
+    # Presented as `text="hello", re=1` -> canonical is srx|1|hello<0x1f>re=1 -> mismatch.
+    collision = client.post(
+        "/r/srx",
+        json={"did": did, "sig": sig_a, "nonce": "1", "text": "hello", "re": 1},
+    )
+    assert collision.status_code == 403, collision.text
+
+    # And the legitimate `text="hello", re=1` signature verifies.
+    sig_b = sign(f"srx|1|{store.clean_text('hello')}\x1fre=1")
+    ok = client.post(
+        "/r/srx",
+        json={"did": did, "sig": sig_b, "nonce": "1", "text": "hello", "re": 1},
+    )
+    assert ok.status_code == 200, ok.text

@@ -1360,7 +1360,12 @@ def room_say_signed(request: Request) -> Response:
     room, nonce = p["room"], p["nonce"]
     body = store.clean_text(p["text"])  # sweep first: the signature covers what is stored
     re_ref = _re_query(request)
-    canonical = f"{room}|{nonce}|{body}" + (f"|{re_ref}" if re_ref is not None else "")
+    # \x1f is a Cc control char; clean_text replaces every Cc char with a space before
+    # storage, so it can never appear in `body`. Using it as the re marker makes the
+    # re-present canonical unambiguous (text="hello|5", re=None -> room|nonce|hello|5 ;
+    # text="hello", re=5 -> room|nonce|hello\x1fre=5) while leaving the re=None canonical
+    # byte-identical to main, so already-signed messages keep re-verifying.
+    canonical = f"{room}|{nonce}|{body}" + (f"\x1fre={re_ref}" if re_ref is not None else "")
     signer = _signer(p["did"], p["sig"], nonce, canonical)
     if isinstance(signer, Response):
         return signer
@@ -1463,7 +1468,9 @@ async def room_post(request: Request) -> Response:
     if did:
         sig, nonce = _field(payload, "sig").strip(), _field(payload, "nonce").strip()
         body = store.clean_text(sent)
-        canonical = f"{room}|{nonce}|{body}" + (f"|{re_body}" if re_body is not None else "")
+        # \x1f (Cc) can never appear in swept `body`; see the GET signed path above for the
+        # rationale. Keeps the re=None canonical identical to main for back-compat.
+        canonical = f"{room}|{nonce}|{body}" + (f"\x1fre={re_body}" if re_body is not None else "")
         signer = _signer(did, sig, nonce, canonical)
         if isinstance(signer, Response):
             return signer

@@ -182,7 +182,9 @@ def main() -> None:
     if args.cmd == "say":
         canonical = f"{args.room}|{args.nonce}|{swept(args.text, MAX_TEXT_CHARS)}"
         if args.re is not None:
-            canonical += f"|{args.re}"
+            # \x1f (Cc) can never appear in swept text, so this marker is unambiguous and
+            # keeps the re=None canonical identical to the server's main for back-compat.
+            canonical += f"\x1fre={args.re}"
     else:
         canonical = f"{args.ns}|{args.key}|{args.nonce}|{swept(args.value, MAX_VALUE_CHARS)}"
     key, _ = load_key(seed)
